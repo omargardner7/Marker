@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Exam Marking Tool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.min.js"></script>
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.worker.min.js';
+    </script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .pdf-canvas-container {
+            width: 100%;
+            max-width: 800px; /* Max width for the PDF viewer */
+            margin: 0 auto;
+            border: 1px solid #ccc;
+            overflow: auto; /* Add scroll for zoomed content if needed */
+            position: relative; /* For positioning ticks */
+        }
+        #pdfCanvas {
+            display: block; /* Remove extra space below canvas */
+            width: 100%; /* Canvas scales with container */
+            height: auto;
+        }
+        .tick-mark {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52" fill="none" stroke="green" stroke-width="6"><path d="M14 27l7.688 7.688a2 2 0 002.828 0L40 16"/></svg>');
+            background-size: contain;
+            background-repeat: no-repeat;
+            pointer-events: none; /* Clicks go through the tick to the canvas */
+            transform: translate(-50%, -50%); /* Center the tick on click */
+        }
+        .modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .modal-content {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.25);
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 p-4 md:p-8">
+
+    <div class="container mx-auto max-w-4xl bg-white p-6 rounded-lg shadow-xl">
+        <header class="mb-6 text-center">
+            <h1 class="text-3xl font-bold text-blue-600">Exam Paper Marking Tool</h1>
+            <p class="text-sm text-gray-500" id="userIdDisplay">User ID: Loading...</p>
+        </header>
+
+        <div id="authStatus" class="mb-4 p-3 rounded-md text-center bg-blue-100 text-blue-700">
+            Initializing Firebase...
+        </div>
+
+        <section id="setupSection" class="mb-6 p-4 border rounded-lg bg-gray-50">
+            <h2 class="text-xl font-semibold mb-3 text-gray-700">Setup</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
+                <div>
+                    <label for="pdfFiles" class="block text-sm font-medium text-gray-700 mb-1">1. Select PDF Exam Papers (StudentName_Exam.pdf):</label>
+                    <input type="file" id="pdfFiles" accept=".pdf" multiple class="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <div>
+                    <label for="pageNumber" class="block text-sm font-medium text-gray-700 mb-1">2. Page to Mark:</label>
+                    <input type="number" id="pageNumber" value="1" min="1" class="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500">
+                </div>
+            </div>
+            <button id="startMarkingBtn" class="mt-4 w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-md transition duration-150 disabled:opacity-50" disabled>
+                Load PDFs and Start Marking
+            </button>
+        </section>
+
+        <section id="markingSection" class="hidden mb-6 p-4 border rounded-lg bg-gray-50">
+            <div class="flex flex-col md:flex-row justify-between items-center mb-4">
+                <div>
+                    <h2 class="text-xl font-semibold text-gray-700">Current Student: <span id="currentStudentName" class="text-blue-600">N/A</span></h2>
+                    <p class="text-sm text-gray-500">Marking Page: <span id="currentPageDisplay">N/A</span> of <span id="totalPagesDisplay">N/A</span></p>
+                </div>
+                <div class="text-lg font-bold">Ticks: <span id="tickCount" class="text-green-600">0</span></div>
+            </div>
+
+            <div class="pdf-canvas-container mb-4">
+                <canvas id="pdfCanvas"></canvas>
+                <div id="tickContainer"></div> </div>
+            
+            <div class="flex flex-wrap gap-2 justify-center">
+                <button id="prevPageBtn" class="bg-gray-500 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-md transition duration-150">Prev Page</button>
+                <button id="nextPageBtn" class="bg-gray-500 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-md transition duration-150">Next Page</button>
+                <button id="undoTickBtn" class="bg-yellow-500 hover:bg-yellow-600 text-white font-semibold py-2 px-4 rounded-md transition duration-150">Undo Last Tick</button>
+                <button id="nextStudentBtn" class="bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-md transition duration-150">Save & Next Student</button>
+            </div>
+        </section>
+
+        <section id="resultsSection" class="p-4 border rounded-lg bg-gray-50">
+            <h2 class="text-xl font-semibold mb-3 text-gray-700">Marking Summary</h2>
+            <div id="marksSummary" class="mb-3 max-h-60 overflow-y-auto">
+                <p class="text-gray-500">No marks recorded yet.</p>
+            </div>
+            <button id="exportCsvBtn" class="w-full bg-purple-500 hover:bg-purple-600 text-white font-semibold py-2 px-4 rounded-md transition duration-150 disabled:opacity-50" disabled>
+                Export Marks as CSV
+            </button>
+        </section>
+
+        <div id="messageModal" class="modal hidden">
+            <div class="modal-content text-center">
+                <p id="modalMessageText" class="mb-4"></p>
+                <button id="modalCloseBtn" class="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-md">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, getDocs, onSnapshot, deleteDoc, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { apiKey: "AIzaSyA2YMiyJi17F5WE3trZ7FaKTxuBMRs1yf8", authDomain: "marker-bb02f.firebaseapp.com", projectId: "marker-bb02f" }; // Fallback for local dev
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'pdf-marker-app-dev';
+
+        let app;
+        let auth;
+        let db;
+        let userId;
+        let isAuthReady = false;
+
+        // UI Elements
+        const pdfFilesInput = document.getElementById('pdfFiles');
+        const pageNumberInput = document.getElementById('pageNumber');
+        const startMarkingBtn = document.getElementById('startMarkingBtn');
+        const markingSection = document.getElementById('markingSection');
+        const setupSection = document.getElementById('setupSection');
+        const resultsSection = document.getElementById('resultsSection');
+        const currentStudentNameDisplay = document.getElementById('currentStudentName');
+        const currentPageDisplay = document.getElementById('currentPageDisplay');
+        const totalPagesDisplay = document.getElementById('totalPagesDisplay');
+        const tickCountDisplay = document.getElementById('tickCount');
+        const pdfCanvas = document.getElementById('pdfCanvas');
+        const tickContainer = document.getElementById('tickContainer');
+        const prevPageBtn = document.getElementById('prevPageBtn');
+        const nextPageBtn = document.getElementById('nextPageBtn');
+        const undoTickBtn = document.getElementById('undoTickBtn');
+        const nextStudentBtn = document.getElementById('nextStudentBtn');
+        const marksSummaryDisplay = document.getElementById('marksSummary');
+        const exportCsvBtn = document.getElementById('exportCsvBtn');
+        const userIdDisplay = document.getElementById('userIdDisplay');
+        const authStatusDiv = document.getElementById('authStatus');
+
+        const messageModal = document.getElementById('messageModal');
+        const modalMessageText = document.getElementById('modalMessageText');
+        const modalCloseBtn = document.getElementById('modalCloseBtn');
+
+        // App State
+        let pdfDocs = []; // Array of { file: File, name: string, pdfDoc: PDFDocumentProxy }
+        let currentStudentIndex = -1;
+        let currentPdfDoc = null;
+        let currentPageNum = 1; // The page number being marked across students
+        let targetPageNumForMarking = 1; // The page number chosen by user initially
+        let ticks = []; // Array of {x, y, page} for current student
+        let allStudentMarks = []; // Array of { name: string, mark: number, pdfName: string }
+
+        // --- Firebase Initialization and Auth ---
+        async function initializeFirebase() {
+            try {
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+                
+                // Set persistence to local to keep user signed in
+                await setPersistence(auth, browserLocalPersistence);
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        userIdDisplay.textContent = `User ID: ${userId}`;
+                        authStatusDiv.textContent = "Firebase Authenticated.";
+                        authStatusDiv.className = "mb-4 p-3 rounded-md text-center bg-green-100 text-green-700";
+                        isAuthReady = true;
+                        console.log("Firebase Authenticated. User ID:", userId);
+                        await loadAppState(); // Load saved state AFTER auth is ready
+                        await loadAllMarksFromFirestore(); // Load all marks for summary
+                        updateStartButtonState();
+                    } else {
+                        // No user is signed in. Try to sign in.
+                        authStatusDiv.textContent = "Authenticating...";
+                        try {
+                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                                console.log("Attempting signInWithCustomToken");
+                                await signInWithCustomToken(auth, __initial_auth_token);
+                                // onAuthStateChanged will be triggered again
+                            } else {
+                                console.log("Attempting signInAnonymously");
+                                await signInAnonymously(auth);
+                                // onAuthStateChanged will be triggered again
+                            }
+                        } catch (error) {
+                            console.error("Firebase Authentication Error:", error);
+                            authStatusDiv.textContent = "Authentication Failed. Please refresh.";
+                            authStatusDiv.className = "mb-4 p-3 rounded-md text-center bg-red-100 text-red-700";
+                            showMessageModal(`Authentication Error: ${error.message}. Some features might not work correctly.`);
+                        }
+                    }
+                });
+            } catch (error) {
+                console.error("Firebase Initialization Error:", error);
+                authStatusDiv.textContent = "Firebase Initialization Failed. Please refresh.";
+                authStatusDiv.className = "mb-4 p-3 rounded-md text-center bg-red-100 text-red-700";
+                showMessageModal(`Firebase Initialization Error: ${error.message}. App might not function correctly.`);
+            }
+        }
+        
+        // --- Message Modal ---
+        function showMessageModal(message) {
+            modalMessageText.textContent = message;
+            messageModal.classList.remove('hidden');
+        }
+        modalCloseBtn.addEventListener('click', () => messageModal.classList.add('hidden'));
+
+        // --- Firestore Data Handling ---
+        const appStateDocRef = () => doc(db, "artifacts", appId, "users", userId, "pdfMarkerState", "appData");
+        const studentMarksCollectionRef = () => collection(db, "artifacts", appId, "users", userId, "studentMarks");
+
+        async function saveAppState() {
+            if (!isAuthReady || !userId) {
+                console.warn("Auth not ready, skipping saveAppState");
+                return;
+            }
+            try {
+                const state = {
+                    currentStudentIndex,
+                    targetPageNumForMarking,
+                    pdfFileNames: pdfDocs.map(doc => doc.file.name), // Save filenames to re-associate on load
+                    lastActiveTimestamp: new Date().toISOString()
+                };
+                await setDoc(appStateDocRef(), state);
+                console.log("App state saved to Firestore.");
+            } catch (error) {
+                console.error("Error saving app state:", error);
+                showMessageModal("Error saving progress. Please check console.");
+            }
+        }
+
+        async function loadAppState() {
+            if (!isAuthReady || !userId) {
+                 console.warn("Auth not ready, skipping loadAppState");
+                return;
+            }
+            try {
+                const docSnap = await getDoc(appStateDocRef());
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    currentStudentIndex = data.currentStudentIndex !== undefined ? data.currentStudentIndex : -1;
+                    targetPageNumForMarking = data.targetPageNumForMarking || 1;
+                    pageNumberInput.value = targetPageNumForMarking;
+                    
+                    // If there are saved PDF filenames, prompt user to reselect them for security/privacy reasons.
+                    // We cannot directly access local files again.
+                    if (data.pdfFileNames && data.pdfFileNames.length > 0) {
+                        showMessageModal(`Welcome back! You previously had ${data.pdfFileNames.length} PDF(s) loaded (${data.pdfFileNames.join(', ')}). Please re-select them to continue where you left off.`);
+                         // We can't auto-load files, so this is mostly for targetPageNumForMarking and currentStudentIndex context.
+                         // The user will still need to select files.
+                    }
+                    console.log("App state loaded from Firestore:", data);
+                } else {
+                    console.log("No saved app state found.");
+                }
+            } catch (error) {
+                console.error("Error loading app state:", error);
+                showMessageModal("Error loading saved progress. Please check console.");
+            }
+        }
+        
+        async function saveStudentMark(studentName, mark, pdfFileName) {
+            if (!isAuthReady || !userId) {
+                console.warn("Auth not ready, skipping saveStudentMark");
+                return;
+            }
+            const studentDocId = pdfFileName.replace(/[^a-zA-Z0-9]/g, '_'); // Create a Firestore-friendly ID
+            try {
+                await setDoc(doc(studentMarksCollectionRef(), studentDocId), {
+                    name: studentName,
+                    mark: mark,
+                    pdfName: pdfFileName, // Original PDF filename
+                    timestamp: new Date().toISOString()
+                });
+                console.log(`Mark for ${studentName} saved.`);
+                await loadAllMarksFromFirestore(); // Refresh summary
+            } catch (error) {
+                console.error("Error saving student mark:", error);
+                showMessageModal(`Error saving mark for ${studentName}.`);
+            }
+        }
+
+        async function loadAllMarksFromFirestore() {
+            if (!isAuthReady || !userId) {
+                console.warn("Auth not ready, skipping loadAllMarksFromFirestore");
+                return;
+            }
+            try {
+                const querySnapshot = await getDocs(studentMarksCollectionRef());
+                allStudentMarks = [];
+                querySnapshot.forEach((doc) => {
+                    allStudentMarks.push({ id: doc.id, ...doc.data() });
+                });
+                renderMarksSummary();
+                exportCsvBtn.disabled = allStudentMarks.length === 0;
+            } catch (error) {
+                console.error("Error loading all marks:", error);
+                showMessageModal("Error loading marks summary.");
+            }
+        }
+
+
+        // --- PDF Handling & Rendering ---
+        function extractStudentName(filename) {
+            // Assuming format "StudentName_AnythingElse.pdf" or "StudentName.pdf"
+            let name = filename.substring(0, filename.lastIndexOf('.')); // Remove extension
+            name = name.replace(/_/g, ' '); // Replace underscores with spaces
+            // Attempt to remove common exam-related suffixes if present
+            const suffixesToRemove = ["Exam Paper", "Exam", "Test", "Quiz", "Submission"];
+            for (const suffix of suffixesToRemove) {
+                if (name.toLowerCase().endsWith(suffix.toLowerCase())) {
+                    name = name.substring(0, name.length - suffix.length).trim();
+                    break; 
+                }
+            }
+            return name.trim();
+        }
+
+        async function loadPdf(file) {
+            const arrayBuffer = await file.arrayBuffer();
+            return pdfjsLib.getDocument({data: arrayBuffer}).promise;
+        }
+
+        async function renderPage(pdfDoc, pageNum) {
+            try {
+                currentPdfDoc = pdfDoc; // Store for potential re-renders (like undo)
+                currentPageNum = pageNum; // Store current page number
+
+                const page = await pdfDoc.getPage(pageNum);
+                const viewport = page.getViewport({scale: 1.5}); // Adjust scale as needed
+                
+                const canvasContext = pdfCanvas.getContext('2d');
+                pdfCanvas.height = viewport.height;
+                pdfCanvas.width = viewport.width;
+
+                const renderContext = {
+                    canvasContext: canvasContext,
+                    viewport: viewport
+                };
+                await page.render(renderContext).promise;
+                
+                currentPageDisplay.textContent = pageNum;
+                totalPagesDisplay.textContent = pdfDoc.numPages;
+                renderTicks(); // Re-render existing ticks for this page
+
+                // Enable/disable page navigation buttons
+                prevPageBtn.disabled = pageNum <= 1;
+                nextPageBtn.disabled = pageNum >= pdfDoc.numPages;
+
+            } catch (error) {
+                console.error("Error rendering page:", error);
+                showMessageModal(`Error rendering PDF page ${pageNum}: ${error.message}. Try another page or PDF.`);
+                currentStudentNameDisplay.textContent = "Error loading PDF";
+                tickCountDisplay.textContent = "0";
+            }
+        }
+
+        // --- Marking Logic ---
+        function handleCanvasClick(event) {
+            if (!currentPdfDoc) return;
+
+            const rect = pdfCanvas.getBoundingClientRect();
+            // Calculate click position relative to the scaled canvas content
+            const scaleX = pdfCanvas.width / rect.width;
+            const scaleY = pdfCanvas.height / rect.height;
+
+            const x = (event.clientX - rect.left) * scaleX;
+            const y = (event.clientY - rect.top) * scaleY;
+            
+            // Store tick relative to the original PDF page dimensions for consistency if canvas size changes
+            // For simplicity here, we store relative to current canvas render.
+            // A more robust solution would map to PDF coordinates.
+            ticks.push({ x, y, page: currentPageNum });
+            renderTicks();
+            updateTickCount();
+        }
+
+        function renderTicks() {
+            tickContainer.innerHTML = ''; // Clear old ticks
+            const pageTicks = ticks.filter(tick => tick.page === currentPageNum);
+
+            pageTicks.forEach(tick => {
+                const tickElement = document.createElement('div');
+                tickElement.className = 'tick-mark';
+                // Position ticks relative to the canvas container
+                tickElement.style.left = `${(tick.x / pdfCanvas.width) * 100}%`;
+                tickElement.style.top = `${(tick.y / pdfCanvas.height) * 100}%`;
+                tickContainer.appendChild(tickElement);
+            });
+        }
+
+        function updateTickCount() {
+            const pageTicksCount = ticks.filter(tick => tick.page === currentPageNum).length;
+            tickCountDisplay.textContent = pageTicksCount;
+        }
+
+        function undoLastTick() {
+            const pageTicks = ticks.filter(tick => tick.page === currentPageNum);
+            if (pageTicks.length > 0) {
+                // Find the last tick added for the current page and remove it from the main ticks array
+                let lastTickIndex = -1;
+                for(let i = ticks.length - 1; i >= 0; i--) {
+                    if(ticks[i].page === currentPageNum) {
+                        lastTickIndex = i;
+                        break;
+                    }
+                }
+                if (lastTickIndex !== -1) {
+                    ticks.splice(lastTickIndex, 1);
+                    renderTicks();
+                    updateTickCount();
+                }
+            } else {
+                showMessageModal("No ticks on the current page to undo.");
+            }
+        }
+
+        // --- Student Navigation and Workflow ---
+        pdfFilesInput.addEventListener('change', () => {
+            updateStartButtonState();
+        });
+        pageNumberInput.addEventListener('input', () => {
+             updateStartButtonState();
+        });
+
+        function updateStartButtonState() {
+            startMarkingBtn.disabled = !(pdfFilesInput.files && pdfFilesInput.files.length > 0 && parseInt(pageNumberInput.value) > 0 && isAuthReady);
+        }
+
+
+        async function startMarking() {
+            if (!isAuthReady) {
+                showMessageModal("Authentication is not ready. Please wait or refresh.");
+                return;
+            }
+            if (pdfFilesInput.files.length === 0) {
+                showMessageModal("Please select at least one PDF file.");
+                return;
+            }
+            targetPageNumForMarking = parseInt(pageNumberInput.value);
+            if (isNaN(targetPageNumForMarking) || targetPageNumForMarking < 1) {
+                showMessageModal("Please enter a valid page number.");
+                return;
+            }
+
+            pdfDocs = [];
+            for (const file of pdfFilesInput.files) {
+                const studentName = extractStudentName(file.name);
+                try {
+                    const pdfDoc = await loadPdf(file);
+                    pdfDocs.push({ file, name: studentName, pdfDoc, originalFilename: file.name });
+                } catch (error) {
+                    console.error(`Error loading PDF ${file.name}:`, error);
+                    showMessageModal(`Could not load ${file.name}. It might be corrupted or not a PDF. Skipping this file.`);
+                }
+            }
+            
+            if (pdfDocs.length === 0) {
+                showMessageModal("No valid PDFs could be loaded. Please check your files.");
+                return;
+            }
+
+            currentStudentIndex = 0; // Start with the first student
+            setupSection.classList.add('hidden');
+            markingSection.classList.remove('hidden');
+            resultsSection.classList.remove('hidden'); // Show results section too
+            await loadStudent(currentStudentIndex);
+            await saveAppState(); // Save initial state
+        }
+
+        async function loadStudent(index) {
+            if (index < 0 || index >= pdfDocs.length) {
+                showMessageModal("All students marked!");
+                markingSection.classList.add('hidden');
+                currentStudentNameDisplay.textContent = "All Done!";
+                currentPdfDoc = null;
+                ticks = [];
+                updateTickCount();
+                await saveAppState(); // Save final state
+                return;
+            }
+
+            const studentData = pdfDocs[index];
+            currentStudentNameDisplay.textContent = studentData.name;
+            ticks = []; // Reset ticks for new student
+
+            // Check if targetPageNumForMarking is valid for this PDF
+            if (targetPageNumForMarking > studentData.pdfDoc.numPages) {
+                showMessageModal(`Page ${targetPageNumForMarking} does not exist for ${studentData.name} (only ${studentData.pdfDoc.numPages} pages). Defaulting to page 1.`);
+                currentPageNum = 1;
+            } else {
+                currentPageNum = targetPageNumForMarking;
+            }
+            
+            await renderPage(studentData.pdfDoc, currentPageNum);
+            updateTickCount();
+            await saveAppState();
+        }
+
+        async function handleNextStudent() {
+            if (!currentPdfDoc || currentStudentIndex < 0 || currentStudentIndex >= pdfDocs.length) {
+                 showMessageModal("No current student to save marks for, or end of list.");
+                return;
+            }
+
+            const studentData = pdfDocs[currentStudentIndex];
+            const totalTicksForStudent = ticks.length; // For this version, total ticks across all viewed pages for this student.
+                                                      // If only one page is marked, this is fine.
+                                                      // For multi-page marking, tick storage needs to be page-specific for final sum.
+                                                      // For now, we assume marking is primarily on targetPageNumForMarking.
+            
+            await saveStudentMark(studentData.name, totalTicksForStudent, studentData.originalFilename);
+            
+            currentStudentIndex++;
+            if (currentStudentIndex >= pdfDocs.length) {
+                showMessageModal("All students have been marked!");
+                markingSection.classList.add('hidden');
+                currentStudentNameDisplay.textContent = "All Done!";
+                pdfCanvas.getContext('2d').clearRect(0,0,pdfCanvas.width, pdfCanvas.height);
+                tickContainer.innerHTML = '';
+                totalPagesDisplay.textContent = "N/A";
+                currentPageDisplay.textContent = "N/A";
+                tickCountDisplay.textContent = "0";
+                await saveAppState();
+            } else {
+                await loadStudent(currentStudentIndex);
+            }
+        }
+        
+        function handlePageNavigation(direction) {
+            if (!currentPdfDoc) return;
+            let newPage = currentPageNum + direction;
+            if (newPage >= 1 && newPage <= currentPdfDoc.numPages) {
+                renderPage(currentPdfDoc, newPage);
+                // Ticks are global for the student for now, but count displayed is per page
+                updateTickCount(); // Update count for the new page
+            }
+        }
+
+        // --- Results & Export ---
+        function renderMarksSummary() {
+            if (allStudentMarks.length === 0) {
+                marksSummaryDisplay.innerHTML = '<p class="text-gray-500">No marks recorded yet.</p>';
+                exportCsvBtn.disabled = true;
+                return;
+            }
+
+            let html = '<ul class="divide-y divide-gray-200">';
+            allStudentMarks.sort((a,b) => a.name.localeCompare(b.name)).forEach(markInfo => {
+                html += `<li class="py-2 px-1 flex justify-between items-center">
+                            <span>${markInfo.name} (<small class="text-gray-500">${markInfo.pdfName}</small>)</span>
+                            <span class="font-semibold text-green-600">${markInfo.mark} ticks</span>
+                         </li>`;
+            });
+            html += '</ul>';
+            marksSummaryDisplay.innerHTML = html;
+            exportCsvBtn.disabled = false;
+        }
+
+        function exportToCsv() {
+            if (allStudentMarks.length === 0) {
+                showMessageModal("No marks to export.");
+                return;
+            }
+
+            let csvContent = "data:text/csv;charset=utf-8,Student Name,PDF Filename,Marks\n";
+            allStudentMarks.forEach(markInfo => {
+                const row = `"${markInfo.name}","${markInfo.pdfName}",${markInfo.mark}\n`;
+                csvContent += row;
+            });
+
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `student_marks_${appId}_${new Date().toISOString().slice(0,10)}.csv`);
+            document.body.appendChild(link); // Required for Firefox
+            link.click();
+            document.body.removeChild(link);
+            showMessageModal("Marks exported as CSV.");
+        }
+
+        // --- Event Listeners ---
+        startMarkingBtn.addEventListener('click', startMarking);
+        pdfCanvas.addEventListener('click', handleCanvasClick);
+        undoTickBtn.addEventListener('click', undoLastTick);
+        nextStudentBtn.addEventListener('click', handleNextStudent);
+        prevPageBtn.addEventListener('click', () => handlePageNavigation(-1));
+        nextPageBtn.addEventListener('click', () => handlePageNavigation(1));
+        exportCsvBtn.addEventListener('click', exportToCsv);
+
+        // --- Initialize ---
+        initializeFirebase();
+
+    </script>
+</body>
+</html>
