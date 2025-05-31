@@ -94,7 +94,8 @@
 
             <div class="pdf-canvas-container mb-4">
                 <canvas id="pdfCanvas"></canvas>
-                <div id="tickContainer"></div> </div>
+                <div id="tickContainer"></div> 
+            </div>
             
             <div class="flex flex-wrap gap-2 justify-center">
                 <button id="prevPageBtn" class="bg-gray-500 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-md transition duration-150">Prev Page</button>
@@ -127,8 +128,23 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, getDoc, collection, getDocs, onSnapshot, deleteDoc, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { apiKey: "YOUR_API_KEY", authDomain: "YOUR_AUTH_DOMAIN", projectId: "YOUR_PROJECT_ID" }; // Fallback for local dev
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'pdf-marker-app-dev';
+        // User-provided Firebase configuration
+        const userProvidedFirebaseConfig = {
+            apiKey: "AIzaSyA2YMiyJi17F5WE3trZ7FaKTxuBMRs1yf8",
+            authDomain: "marker-bb02f.firebaseapp.com",
+            projectId: "marker-bb02f",
+            storageBucket: "marker-bb02f.appspot.com", // Standard format, or use "marker-bb02f.firebasestorage.app" if that's what your console shows
+            messagingSenderId: "860270015755",
+            appId: "1:860270015755:web:663b6fbf289c1930169e0e",
+            measurementId: "G-DB08RYGC9W"
+        };
+        
+        // Use __firebase_config if provided by an environment (like Canvas), otherwise use the hardcoded config for GitHub Pages/standalone.
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : userProvidedFirebaseConfig;
+        
+        // This appId is used for namespacing Firestore data, distinct from Firebase's own appId in firebaseConfig.
+        // Changed fallback for clarity when hosted on GitHub.
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'pdf-marker-github'; 
 
         let app;
         let auth;
@@ -163,13 +179,13 @@
         const modalCloseBtn = document.getElementById('modalCloseBtn');
 
         // App State
-        let pdfDocs = []; // Array of { file: File, name: string, pdfDoc: PDFDocumentProxy }
+        let pdfDocs = []; // Array of { file: File, name: string, pdfDoc: PDFDocumentProxy, originalFilename: string }
         let currentStudentIndex = -1;
         let currentPdfDoc = null;
         let currentPageNum = 1; // The page number being marked across students
         let targetPageNumForMarking = 1; // The page number chosen by user initially
         let ticks = []; // Array of {x, y, page} for current student
-        let allStudentMarks = []; // Array of { name: string, mark: number, pdfName: string }
+        let allStudentMarks = []; // Array of { id: string, name: string, mark: number, pdfName: string }
 
         // --- Firebase Initialization and Auth ---
         async function initializeFirebase() {
@@ -196,20 +212,19 @@
                         // No user is signed in. Try to sign in.
                         authStatusDiv.textContent = "Authenticating...";
                         try {
+                            // For GitHub Pages/standalone, __initial_auth_token will be undefined.
                             if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                                 console.log("Attempting signInWithCustomToken");
                                 await signInWithCustomToken(auth, __initial_auth_token);
-                                // onAuthStateChanged will be triggered again
                             } else {
                                 console.log("Attempting signInAnonymously");
                                 await signInAnonymously(auth);
-                                // onAuthStateChanged will be triggered again
                             }
                         } catch (error) {
                             console.error("Firebase Authentication Error:", error);
                             authStatusDiv.textContent = "Authentication Failed. Please refresh.";
                             authStatusDiv.className = "mb-4 p-3 rounded-md text-center bg-red-100 text-red-700";
-                            showMessageModal(`Authentication Error: ${error.message}. Some features might not work correctly.`);
+                            showMessageModal(`Authentication Error: ${error.message}. Ensure Firebase Anonymous Sign-In is enabled in your Firebase project console.`);
                         }
                     }
                 });
@@ -217,7 +232,7 @@
                 console.error("Firebase Initialization Error:", error);
                 authStatusDiv.textContent = "Firebase Initialization Failed. Please refresh.";
                 authStatusDiv.className = "mb-4 p-3 rounded-md text-center bg-red-100 text-red-700";
-                showMessageModal(`Firebase Initialization Error: ${error.message}. App might not function correctly.`);
+                showMessageModal(`Firebase Initialization Error: ${error.message}. Check your Firebase configuration.`);
             }
         }
         
@@ -229,6 +244,7 @@
         modalCloseBtn.addEventListener('click', () => messageModal.classList.add('hidden'));
 
         // --- Firestore Data Handling ---
+        // Note: 'appId' here refers to the const appId defined above for namespacing, not firebaseConfig.appId
         const appStateDocRef = () => doc(db, "artifacts", appId, "users", userId, "pdfMarkerState", "appData");
         const studentMarksCollectionRef = () => collection(db, "artifacts", appId, "users", userId, "studentMarks");
 
@@ -241,7 +257,8 @@
                 const state = {
                     currentStudentIndex,
                     targetPageNumForMarking,
-                    pdfFileNames: pdfDocs.map(doc => doc.file.name), // Save filenames to re-associate on load
+                    // pdfFileNames: pdfDocs.map(doc => doc.file.name), // Storing File objects directly is not possible, so filenames are a reminder.
+                    pdfFileNames: pdfDocs.map(pDoc => pDoc.originalFilename),
                     lastActiveTimestamp: new Date().toISOString()
                 };
                 await setDoc(appStateDocRef(), state);
@@ -265,12 +282,8 @@
                     targetPageNumForMarking = data.targetPageNumForMarking || 1;
                     pageNumberInput.value = targetPageNumForMarking;
                     
-                    // If there are saved PDF filenames, prompt user to reselect them for security/privacy reasons.
-                    // We cannot directly access local files again.
                     if (data.pdfFileNames && data.pdfFileNames.length > 0) {
-                        showMessageModal(`Welcome back! You previously had ${data.pdfFileNames.length} PDF(s) loaded (${data.pdfFileNames.join(', ')}). Please re-select them to continue where you left off.`);
-                         // We can't auto-load files, so this is mostly for targetPageNumForMarking and currentStudentIndex context.
-                         // The user will still need to select files.
+                        showMessageModal(`Welcome back! You previously had ${data.pdfFileNames.length} PDF(s) loaded (${data.pdfFileNames.join(', ')}). Please re-select them to continue where you left off. Your current student index and target page are restored.`);
                     }
                     console.log("App state loaded from Firestore:", data);
                 } else {
@@ -287,16 +300,17 @@
                 console.warn("Auth not ready, skipping saveStudentMark");
                 return;
             }
-            const studentDocId = pdfFileName.replace(/[^a-zA-Z0-9]/g, '_'); // Create a Firestore-friendly ID
+            // Use a Firestore-friendly ID. Replace non-alphanumeric characters.
+            const studentDocId = pdfFileName.replace(/[^a-zA-Z0-9.-_]/g, '_') + '_' + studentName.replace(/[^a-zA-Z0-9]/g, '');
             try {
                 await setDoc(doc(studentMarksCollectionRef(), studentDocId), {
                     name: studentName,
                     mark: mark,
-                    pdfName: pdfFileName, // Original PDF filename
+                    pdfName: pdfFileName, 
                     timestamp: new Date().toISOString()
                 });
                 console.log(`Mark for ${studentName} saved.`);
-                await loadAllMarksFromFirestore(); // Refresh summary
+                await loadAllMarksFromFirestore(); 
             } catch (error) {
                 console.error("Error saving student mark:", error);
                 showMessageModal(`Error saving mark for ${studentName}.`);
@@ -325,15 +339,13 @@
 
         // --- PDF Handling & Rendering ---
         function extractStudentName(filename) {
-            // Assuming format "StudentName_AnythingElse.pdf" or "StudentName.pdf"
-            let name = filename.substring(0, filename.lastIndexOf('.')); // Remove extension
-            name = name.replace(/_/g, ' '); // Replace underscores with spaces
-            // Attempt to remove common exam-related suffixes if present
-            const suffixesToRemove = ["Exam Paper", "Exam", "Test", "Quiz", "Submission"];
+            let name = filename.substring(0, filename.lastIndexOf('.')); 
+            name = name.replace(/_/g, ' '); 
+            const suffixesToRemove = ["Exam Paper", "Exam", "Test", "Quiz", "Submission", "paper"];
             for (const suffix of suffixesToRemove) {
-                if (name.toLowerCase().endsWith(suffix.toLowerCase())) {
-                    name = name.substring(0, name.length - suffix.length).trim();
-                    break; 
+                // Case-insensitive removal of suffix from the end of the name
+                if (name.toLowerCase().endsWith(" " + suffix.toLowerCase()) || name.toLowerCase().endsWith(suffix.toLowerCase())) {
+                    name = name.substring(0, name.toLowerCase().lastIndexOf(suffix.toLowerCase())).trim();
                 }
             }
             return name.trim();
@@ -346,11 +358,15 @@
 
         async function renderPage(pdfDoc, pageNum) {
             try {
-                currentPdfDoc = pdfDoc; // Store for potential re-renders (like undo)
-                currentPageNum = pageNum; // Store current page number
+                currentPdfDoc = pdfDoc; 
+                currentPageNum = pageNum; 
 
                 const page = await pdfDoc.getPage(pageNum);
-                const viewport = page.getViewport({scale: 1.5}); // Adjust scale as needed
+                // Adjust scale for better viewing, ensure it fits well.
+                const desiredWidth = pdfCanvas.parentElement.clientWidth * 0.95; // Use 95% of container width
+                const viewportUnscaled = page.getViewport({scale:1});
+                const scale = desiredWidth / viewportUnscaled.width;
+                const viewport = page.getViewport({scale: scale}); 
                 
                 const canvasContext = pdfCanvas.getContext('2d');
                 pdfCanvas.height = viewport.height;
@@ -364,9 +380,8 @@
                 
                 currentPageDisplay.textContent = pageNum;
                 totalPagesDisplay.textContent = pdfDoc.numPages;
-                renderTicks(); // Re-render existing ticks for this page
+                renderTicks(); 
 
-                // Enable/disable page navigation buttons
                 prevPageBtn.disabled = pageNum <= 1;
                 nextPageBtn.disabled = pageNum >= pdfDoc.numPages;
 
@@ -383,56 +398,52 @@
             if (!currentPdfDoc) return;
 
             const rect = pdfCanvas.getBoundingClientRect();
-            // Calculate click position relative to the scaled canvas content
-            const scaleX = pdfCanvas.width / rect.width;
-            const scaleY = pdfCanvas.height / rect.height;
+            // Correctly map click coordinates to canvas coordinates, considering CSS scaling
+            const canvasX = event.clientX - rect.left;
+            const canvasY = event.clientY - rect.top;
 
-            const x = (event.clientX - rect.left) * scaleX;
-            const y = (event.clientY - rect.top) * scaleY;
-            
-            // Store tick relative to the original PDF page dimensions for consistency if canvas size changes
-            // For simplicity here, we store relative to current canvas render.
-            // A more robust solution would map to PDF coordinates.
-            ticks.push({ x, y, page: currentPageNum });
+            // Store ticks relative to the actual canvas dimensions
+            // These are logical coordinates on the canvas, not PDF coordinates.
+            ticks.push({ x: canvasX, y: canvasY, page: currentPageNum });
             renderTicks();
             updateTickCount();
         }
 
         function renderTicks() {
-            tickContainer.innerHTML = ''; // Clear old ticks
+            tickContainer.innerHTML = ''; 
             const pageTicks = ticks.filter(tick => tick.page === currentPageNum);
 
             pageTicks.forEach(tick => {
                 const tickElement = document.createElement('div');
                 tickElement.className = 'tick-mark';
-                // Position ticks relative to the canvas container
-                tickElement.style.left = `${(tick.x / pdfCanvas.width) * 100}%`;
-                tickElement.style.top = `${(tick.y / pdfCanvas.height) * 100}%`;
+                // Position ticks based on their stored canvas coordinates
+                tickElement.style.left = `${tick.x}px`;
+                tickElement.style.top = `${tick.y}px`;
                 tickContainer.appendChild(tickElement);
             });
         }
 
         function updateTickCount() {
+            // This counts ticks placed on the *currently visible page* only for display.
+            // The `ticks` array itself holds all ticks for the current student across all pages they might have navigated to.
             const pageTicksCount = ticks.filter(tick => tick.page === currentPageNum).length;
             tickCountDisplay.textContent = pageTicksCount;
         }
 
         function undoLastTick() {
-            const pageTicks = ticks.filter(tick => tick.page === currentPageNum);
-            if (pageTicks.length > 0) {
-                // Find the last tick added for the current page and remove it from the main ticks array
-                let lastTickIndex = -1;
-                for(let i = ticks.length - 1; i >= 0; i--) {
-                    if(ticks[i].page === currentPageNum) {
-                        lastTickIndex = i;
-                        break;
-                    }
+            // Find the last tick added for the *current page* and remove it.
+            let lastTickOnPageIndex = -1;
+            for(let i = ticks.length - 1; i >= 0; i--) {
+                if(ticks[i].page === currentPageNum) {
+                    lastTickOnPageIndex = i;
+                    break;
                 }
-                if (lastTickIndex !== -1) {
-                    ticks.splice(lastTickIndex, 1);
-                    renderTicks();
-                    updateTickCount();
-                }
+            }
+
+            if (lastTickOnPageIndex !== -1) {
+                ticks.splice(lastTickOnPageIndex, 1);
+                renderTicks();
+                updateTickCount();
             } else {
                 showMessageModal("No ticks on the current page to undo.");
             }
@@ -466,12 +477,17 @@
                 return;
             }
 
-            pdfDocs = [];
-            for (const file of pdfFilesInput.files) {
+            pdfDocs = []; // Reset list of PDFs
+            const files = Array.from(pdfFilesInput.files); // Convert FileList to array for easier processing
+
+            // Show a loading indicator if processing many files (optional)
+            showMessageModal(`Loading ${files.length} PDF(s)... this may take a moment.`);
+
+            for (const file of files) {
                 const studentName = extractStudentName(file.name);
                 try {
-                    const pdfDoc = await loadPdf(file);
-                    pdfDocs.push({ file, name: studentName, pdfDoc, originalFilename: file.name });
+                    const pdfDocProxy = await loadPdf(file);
+                    pdfDocs.push({ file: file, name: studentName, pdfDoc: pdfDocProxy, originalFilename: file.name });
                 } catch (error) {
                     console.error(`Error loading PDF ${file.name}:`, error);
                     showMessageModal(`Could not load ${file.name}. It might be corrupted or not a PDF. Skipping this file.`);
@@ -479,58 +495,70 @@
             }
             
             if (pdfDocs.length === 0) {
-                showMessageModal("No valid PDFs could be loaded. Please check your files.");
+                showMessageModal("No valid PDFs could be loaded. Please check your files and try again.");
                 return;
             }
+            
+            // Sort pdfDocs by original filename to ensure consistent order if files are selected differently
+            pdfDocs.sort((a, b) => a.originalFilename.localeCompare(b.originalFilename));
 
-            currentStudentIndex = 0; // Start with the first student
+
+            // If currentStudentIndex was loaded from state and is valid for the new set of PDFs, use it.
+            // Otherwise, reset to 0. This handles re-loading files after a refresh.
+            if (currentStudentIndex < 0 || currentStudentIndex >= pdfDocs.length) {
+                 currentStudentIndex = 0; 
+            }
+           
             setupSection.classList.add('hidden');
             markingSection.classList.remove('hidden');
-            resultsSection.classList.remove('hidden'); // Show results section too
-            await loadStudent(currentStudentIndex);
-            await saveAppState(); // Save initial state
+            resultsSection.classList.remove('hidden'); 
+            await loadStudent(currentStudentIndex); // Load the student (either first or restored index)
+            await saveAppState(); 
+            messageModal.classList.add('hidden'); // Hide loading message
         }
 
         async function loadStudent(index) {
             if (index < 0 || index >= pdfDocs.length) {
-                showMessageModal("All students marked!");
+                showMessageModal("All students marked or no students loaded!");
                 markingSection.classList.add('hidden');
                 currentStudentNameDisplay.textContent = "All Done!";
                 currentPdfDoc = null;
                 ticks = [];
                 updateTickCount();
-                await saveAppState(); // Save final state
+                await saveAppState(); 
                 return;
             }
 
             const studentData = pdfDocs[index];
             currentStudentNameDisplay.textContent = studentData.name;
-            ticks = []; // Reset ticks for new student
+            ticks = []; // Reset ticks for the new student
 
-            // Check if targetPageNumForMarking is valid for this PDF
             if (targetPageNumForMarking > studentData.pdfDoc.numPages) {
-                showMessageModal(`Page ${targetPageNumForMarking} does not exist for ${studentData.name} (only ${studentData.pdfDoc.numPages} pages). Defaulting to page 1.`);
+                showMessageModal(`Page ${targetPageNumForMarking} does not exist for ${studentData.name} (PDF has ${studentData.pdfDoc.numPages} pages). Defaulting to page 1.`);
                 currentPageNum = 1;
             } else {
                 currentPageNum = targetPageNumForMarking;
             }
             
             await renderPage(studentData.pdfDoc, currentPageNum);
-            updateTickCount();
-            await saveAppState();
+            updateTickCount(); // Ensure tick count is updated for the newly loaded student/page
+            await saveAppState(); // Save state after loading new student
         }
 
         async function handleNextStudent() {
-            if (!currentPdfDoc || currentStudentIndex < 0 || currentStudentIndex >= pdfDocs.length) {
-                 showMessageModal("No current student to save marks for, or end of list.");
+            if (currentStudentIndex < 0 || currentStudentIndex >= pdfDocs.length) {
+                 showMessageModal("No current student to save marks for, or you are at the end of the list.");
+                return;
+            }
+            if (!currentPdfDoc) { // Should not happen if a student is loaded, but good check
+                showMessageModal("No PDF document loaded for the current student.");
                 return;
             }
 
+
             const studentData = pdfDocs[currentStudentIndex];
-            const totalTicksForStudent = ticks.length; // For this version, total ticks across all viewed pages for this student.
-                                                      // If only one page is marked, this is fine.
-                                                      // For multi-page marking, tick storage needs to be page-specific for final sum.
-                                                      // For now, we assume marking is primarily on targetPageNumForMarking.
+            // The mark is the total number of ticks placed for this student across all pages they viewed.
+            const totalTicksForStudent = ticks.length; 
             
             await saveStudentMark(studentData.name, totalTicksForStudent, studentData.originalFilename);
             
@@ -539,7 +567,9 @@
                 showMessageModal("All students have been marked!");
                 markingSection.classList.add('hidden');
                 currentStudentNameDisplay.textContent = "All Done!";
-                pdfCanvas.getContext('2d').clearRect(0,0,pdfCanvas.width, pdfCanvas.height);
+                if(pdfCanvas.getContext('2d')) { // Clear canvas if it exists
+                     pdfCanvas.getContext('2d').clearRect(0,0,pdfCanvas.width, pdfCanvas.height);
+                }
                 tickContainer.innerHTML = '';
                 totalPagesDisplay.textContent = "N/A";
                 currentPageDisplay.textContent = "N/A";
@@ -554,9 +584,9 @@
             if (!currentPdfDoc) return;
             let newPage = currentPageNum + direction;
             if (newPage >= 1 && newPage <= currentPdfDoc.numPages) {
-                renderPage(currentPdfDoc, newPage);
-                // Ticks are global for the student for now, but count displayed is per page
-                updateTickCount(); // Update count for the new page
+                // No need to save app state here, just rendering a different page of current student
+                renderPage(currentPdfDoc, newPage); 
+                updateTickCount(); 
             }
         }
 
@@ -569,10 +599,12 @@
             }
 
             let html = '<ul class="divide-y divide-gray-200">';
-            allStudentMarks.sort((a,b) => a.name.localeCompare(b.name)).forEach(markInfo => {
-                html += `<li class="py-2 px-1 flex justify-between items-center">
-                            <span>${markInfo.name} (<small class="text-gray-500">${markInfo.pdfName}</small>)</span>
-                            <span class="font-semibold text-green-600">${markInfo.mark} ticks</span>
+            // Sort by student name for consistent display
+            const sortedMarks = [...allStudentMarks].sort((a,b) => a.name.localeCompare(b.name));
+            sortedMarks.forEach(markInfo => {
+                html += `<li class="py-2 px-1 flex justify-between items-center text-sm">
+                            <span class="truncate" title="${markInfo.name} - ${markInfo.pdfName}">${markInfo.name} (<small class="text-gray-500 truncate">${markInfo.pdfName}</small>)</span>
+                            <span class="font-semibold text-green-600 ml-2">${markInfo.mark} ticks</span>
                          </li>`;
             });
             html += '</ul>';
@@ -587,16 +619,20 @@
             }
 
             let csvContent = "data:text/csv;charset=utf-8,Student Name,PDF Filename,Marks\n";
-            allStudentMarks.forEach(markInfo => {
-                const row = `"${markInfo.name}","${markInfo.pdfName}",${markInfo.mark}\n`;
+            const sortedMarks = [...allStudentMarks].sort((a,b) => a.name.localeCompare(b.name));
+            sortedMarks.forEach(markInfo => {
+                const name = markInfo.name ? markInfo.name.replace(/"/g, '""') : ""; // Escape double quotes
+                const pdfName = markInfo.pdfName ? markInfo.pdfName.replace(/"/g, '""') : "";
+                const row = `"${name}","${pdfName}",${markInfo.mark}\n`;
                 csvContent += row;
             });
 
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
+            // Use the Firestore namespace appId in the filename for clarity if multiple instances are used
             link.setAttribute("download", `student_marks_${appId}_${new Date().toISOString().slice(0,10)}.csv`);
-            document.body.appendChild(link); // Required for Firefox
+            document.body.appendChild(link); 
             link.click();
             document.body.removeChild(link);
             showMessageModal("Marks exported as CSV.");
